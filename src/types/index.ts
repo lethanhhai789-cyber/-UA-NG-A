@@ -83,6 +83,18 @@ export interface RoomState {
   hurdleQuestionIndex?: number;
 }
 
+export interface Teacher {
+  id: string;
+  name: string;
+  email: string;
+  school: string;
+  subject: string;
+  phone: string;
+  status: 'approved' | 'pending' | 'rejected';
+  isMasterAdmin: boolean;
+  createdAt: number;
+}
+
 export interface RaceReportData {
   roomPin: string;
   title: string;

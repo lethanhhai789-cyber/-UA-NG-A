@@ -1,10 +1,14 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const ROOMS_CACHE_FILE = path.join(__dirname, '.rooms_cache.json');
+const TEACHERS_CACHE_FILE = path.join(__dirname, '.teachers_cache.json');
 
 interface AnswerRecord {
   chosenIndex: number;
@@ -40,11 +44,135 @@ interface RoomData {
   hurdleJumpTeamId?: string | null;
 }
 
+interface TeacherRecord {
+  id: string;
+  name: string;
+  email: string;
+  school: string;
+  subject: string;
+  phone: string;
+  password: string;
+  status: 'approved' | 'pending' | 'rejected';
+  isMasterAdmin: boolean;
+  createdAt: number;
+}
+
+// In-memory caches
 const rooms = new Map<string, RoomData>();
+const teachers = new Map<string, TeacherRecord>();
 const sseClients = new Map<string, Set<express.Response>>();
 
+// Load initial caches from disk
+function loadCachesFromDisk() {
+  try {
+    if (fs.existsSync(ROOMS_CACHE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(ROOMS_CACHE_FILE, 'utf-8'));
+      for (const [pin, room] of Object.entries(data)) {
+        rooms.set(pin.toUpperCase(), room as RoomData);
+      }
+      console.log(`Loaded ${rooms.size} cached rooms from disk.`);
+    }
+  } catch (e) {
+    console.warn('Failed to load rooms cache from disk', e);
+  }
+
+  try {
+    if (fs.existsSync(TEACHERS_CACHE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(TEACHERS_CACHE_FILE, 'utf-8'));
+      for (const [id, t] of Object.entries(data)) {
+        teachers.set(id, t as TeacherRecord);
+      }
+      console.log(`Loaded ${teachers.size} teachers from disk.`);
+    }
+  } catch (e) {
+    console.warn('Failed to load teachers cache from disk', e);
+  }
+
+  // Pre-seed Master Admin Teacher: lethanhhai2905@gmail.com
+  const masterEmail = 'lethanhhai2905@gmail.com';
+  let masterExists = false;
+  for (const t of teachers.values()) {
+    if (t.email.toLowerCase() === masterEmail.toLowerCase()) {
+      masterExists = true;
+      t.status = 'approved';
+      t.isMasterAdmin = true;
+      break;
+    }
+  }
+
+  if (!masterExists) {
+    const masterTeacher: TeacherRecord = {
+      id: 'teacher_master_01',
+      name: 'Thầy Lê Thanh Hải (Chủ Tọa Quản Trị)',
+      email: masterEmail,
+      school: 'Trường THPT Chuyên',
+      subject: 'Toán học & Công nghệ',
+      phone: '0901234567',
+      password: 'giaovien2026', // Default password
+      status: 'approved',
+      isMasterAdmin: true,
+      createdAt: Date.now(),
+    };
+    teachers.set(masterTeacher.id, masterTeacher);
+  }
+
+  // Pre-seed a convenient demo teacher for instant test
+  const demoEmail = 'giaovien@thpt.edu.vn';
+  let demoExists = false;
+  for (const t of teachers.values()) {
+    if (t.email.toLowerCase() === demoEmail.toLowerCase()) {
+      demoExists = true;
+      break;
+    }
+  }
+  if (!demoExists) {
+    const demoTeacher: TeacherRecord = {
+      id: 'teacher_demo_02',
+      name: 'Cô Nguyễn Thu Hằng',
+      email: demoEmail,
+      school: 'THPT Chu Văn An',
+      subject: 'Vật lý & Hóa học',
+      phone: '0988776655',
+      password: '123456',
+      status: 'approved',
+      isMasterAdmin: false,
+      createdAt: Date.now(),
+    };
+    teachers.set(demoTeacher.id, demoTeacher);
+  }
+
+  persistTeachersToDisk();
+}
+
+function persistRoomsToDisk() {
+  try {
+    const obj: Record<string, RoomData> = {};
+    for (const [pin, room] of rooms.entries()) {
+      obj[pin] = room;
+    }
+    fs.writeFileSync(ROOMS_CACHE_FILE, JSON.stringify(obj, null, 2), 'utf-8');
+  } catch (e) {
+    console.warn('Failed to save rooms to disk', e);
+  }
+}
+
+function persistTeachersToDisk() {
+  try {
+    const obj: Record<string, TeacherRecord> = {};
+    for (const [id, t] of teachers.entries()) {
+      obj[id] = t;
+    }
+    fs.writeFileSync(TEACHERS_CACHE_FILE, JSON.stringify(obj, null, 2), 'utf-8');
+  } catch (e) {
+    console.warn('Failed to save teachers to disk', e);
+  }
+}
+
+loadCachesFromDisk();
+
 function broadcastRoomUpdate(roomPin: string, room: RoomData) {
-  const clients = sseClients.get(roomPin);
+  const cleanPin = roomPin.toUpperCase();
+  const clients = sseClients.get(cleanPin);
   if (clients && clients.size > 0) {
     const payload = `data: ${JSON.stringify({ type: 'STATE_UPDATE', state: room })}\n\n`;
     for (const res of clients) {
@@ -64,13 +192,155 @@ async function startServer() {
 
   app.use(express.json({ limit: '2mb' }));
 
-  // API Routes
-  // 1. Get room state
+  // --- TEACHER AUTH & APPROVAL API ---
+
+  // 1. Teacher Register
+  app.post('/api/auth/teacher/register', (req, res) => {
+    const { name, email, school, subject, phone, password } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'Vui lòng điền đầy đủ Họ tên, Email và Mật khẩu!' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Check if email already exists
+    for (const existing of teachers.values()) {
+      if (existing.email.toLowerCase() === cleanEmail) {
+        return res.status(400).json({ error: 'Email này đã được đăng ký trên hệ thống!' });
+      }
+    }
+
+    const isMaster = cleanEmail === 'lethanhhai2905@gmail.com';
+    const newTeacher: TeacherRecord = {
+      id: `teacher_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      name: name.trim(),
+      email: cleanEmail,
+      school: school?.trim() || 'Trường THPT',
+      subject: subject?.trim() || 'Giáo viên THPT',
+      phone: phone?.trim() || '',
+      password: password.trim(),
+      // Master email is automatically approved; others require admin approval!
+      status: isMaster ? 'approved' : 'pending',
+      isMasterAdmin: isMaster,
+      createdAt: Date.now(),
+    };
+
+    teachers.set(newTeacher.id, newTeacher);
+    persistTeachersToDisk();
+
+    const { password: _, ...safeTeacher } = newTeacher;
+    res.json({
+      success: true,
+      teacher: safeTeacher,
+      message: isMaster
+        ? 'Đăng ký thành công với quyền Quản trị viên!'
+        : 'Đăng ký thành công! Thông tin của bạn đã được chuyển đến Quản trị viên để xác nhận tư cách Giáo viên. Vui lòng chờ phê duyệt để đăng nhập.',
+    });
+  });
+
+  // 2. Teacher Login
+  app.post('/api/auth/teacher/login', (req, res) => {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Vui lòng nhập Email và Mật khẩu!' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    let foundTeacher: TeacherRecord | null = null;
+
+    for (const t of teachers.values()) {
+      if (t.email.toLowerCase() === cleanEmail) {
+        foundTeacher = t;
+        break;
+      }
+    }
+
+    if (!foundTeacher) {
+      return res.status(401).json({ error: 'Tài khoản không tồn tại. Vui lòng đăng ký tài khoản Giáo viên trước!' });
+    }
+
+    if (foundTeacher.password !== password.trim()) {
+      return res.status(401).json({ error: 'Mật khẩu không chính xác!' });
+    }
+
+    if (foundTeacher.status === 'pending') {
+      return res.status(403).json({
+        error: 'pending',
+        message: 'Tài khoản của thầy/cô đã gửi thông tin và đang CHỜ QUẢN TRỊ VIÊN XÁC NHẬN quyền Giáo viên. Vui lòng liên hệ Admin (lethanhhai2905@gmail.com) để được duyệt vào hệ thống!',
+      });
+    }
+
+    if (foundTeacher.status === 'rejected') {
+      return res.status(403).json({
+        error: 'rejected',
+        message: 'Tài khoản này chưa được cấp quyền quản trị phòng thi. Vui lòng liên hệ Quản trị viên!',
+      });
+    }
+
+    const { password: _, ...safeTeacher } = foundTeacher;
+    res.json({
+      success: true,
+      teacher: safeTeacher,
+      token: `token_${safeTeacher.id}_${Date.now()}`,
+    });
+  });
+
+  // 3. Teacher List (For Admin Approval)
+  app.get('/api/auth/teacher/list', (req, res) => {
+    const teacherList = Array.from(teachers.values()).map(({ password: _, ...t }) => t);
+    res.json({ teachers: teacherList });
+  });
+
+  // 4. Approve Teacher
+  app.post('/api/auth/teacher/approve', (req, res) => {
+    const { teacherId } = req.body;
+    const t = teachers.get(teacherId);
+    if (!t) {
+      return res.status(404).json({ error: 'Không tìm thấy giáo viên' });
+    }
+
+    t.status = 'approved';
+    persistTeachersToDisk();
+    const { password: _, ...safeTeacher } = t;
+    res.json({ success: true, teacher: safeTeacher });
+  });
+
+  // 5. Reject / Revoke Teacher
+  app.post('/api/auth/teacher/reject', (req, res) => {
+    const { teacherId } = req.body;
+    const t = teachers.get(teacherId);
+    if (!t) {
+      return res.status(404).json({ error: 'Không tìm thấy giáo viên' });
+    }
+
+    t.status = 'rejected';
+    persistTeachersToDisk();
+    const { password: _, ...safeTeacher } = t;
+    res.json({ success: true, teacher: safeTeacher });
+  });
+
+  // --- ROOM MANAGEMENT API ---
+
+  // 1. Get room state by PIN
   app.get('/api/room/:pin', (req, res) => {
-    const pin = req.params.pin.toUpperCase();
-    const room = rooms.get(pin);
+    const rawPin = req.params.pin || '';
+    const pin = rawPin.trim().toUpperCase();
+
+    let room = rooms.get(pin);
     if (!room) {
-      return res.status(404).json({ error: 'Room not found' });
+      // Try finding case-insensitive or trimmed in map
+      for (const [k, v] of rooms.entries()) {
+        if (k.trim().toUpperCase() === pin) {
+          room = v;
+          break;
+        }
+      }
+    }
+
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found', pin });
     }
     res.json({ room });
   });
@@ -82,7 +352,7 @@ async function startServer() {
       return res.status(400).json({ error: 'Invalid room state' });
     }
 
-    const pin = state.roomPin.toUpperCase();
+    const pin = String(state.roomPin).trim().toUpperCase();
     const existing = rooms.get(pin);
 
     // Merge students from existing room if any were already connected
@@ -90,14 +360,12 @@ async function startServer() {
       state.teams.forEach((newTeam: any) => {
         const oldTeam = existing.teams.find((t: any) => t.id === newTeam.id);
         if (oldTeam && oldTeam.members) {
-          // Keep members that might have joined on server
           const memberMap = new Map();
           newTeam.members.forEach((m: any) => memberMap.set(m.id, m));
           oldTeam.members.forEach((m: any) => {
             if (!memberMap.has(m.id)) {
               newTeam.members.push(m);
             } else {
-              // merge answers
               const current = memberMap.get(m.id);
               current.answers = { ...m.answers, ...current.answers };
             }
@@ -108,6 +376,7 @@ async function startServer() {
 
     state.lastUpdated = Date.now();
     rooms.set(pin, state);
+    persistRoomsToDisk();
     broadcastRoomUpdate(pin, state);
 
     res.json({ success: true, room: state });
@@ -115,7 +384,8 @@ async function startServer() {
 
   // 3. Student join room
   app.post('/api/room/:pin/join', (req, res) => {
-    const pin = req.params.pin.toUpperCase();
+    const rawPin = req.params.pin || '';
+    const pin = rawPin.trim().toUpperCase();
     const { student } = req.body;
 
     if (!student || !student.name) {
@@ -124,20 +394,27 @@ async function startServer() {
 
     let room = rooms.get(pin);
     if (!room) {
-      return res.status(404).json({ error: 'Room not found' });
+      for (const [k, v] of rooms.entries()) {
+        if (k.trim().toUpperCase() === pin) {
+          room = v;
+          break;
+        }
+      }
     }
 
-    // Check if student already in room
+    if (!room) {
+      return res.status(404).json({ error: `Phòng thi ${pin} chưa được giáo viên khởi tạo trên hệ thống!` });
+    }
+
     let allMembers: any[] = room.teams.flatMap((t: any) => t.members || []);
     let existingStudent = allMembers.find((m: any) => m.id === student.id);
 
     if (!existingStudent) {
-      // Assign student to the team with least members
       const sortedTeams = [...room.teams].sort((a: any, b: any) => (a.members?.length || 0) - (b.members?.length || 0));
       const targetTeam = sortedTeams[0] || room.teams[0];
 
       const newStudent: StudentData = {
-        id: student.id || `student_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        id: student.id || `s_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         name: student.name.trim(),
         className: student.className?.trim() || '12A',
         teamId: targetTeam.id,
@@ -152,6 +429,7 @@ async function startServer() {
 
     room.lastUpdated = Date.now();
     rooms.set(pin, room);
+    persistRoomsToDisk();
     broadcastRoomUpdate(pin, room);
 
     res.json({ success: true, student: existingStudent, room });
@@ -159,7 +437,7 @@ async function startServer() {
 
   // 4. Student submit answer
   app.post('/api/room/:pin/answer', (req, res) => {
-    const pin = req.params.pin.toUpperCase();
+    const pin = (req.params.pin || '').trim().toUpperCase();
     const { studentId, questionId, chosenIndex, responseTimeSec } = req.body;
 
     const room = rooms.get(pin);
@@ -174,7 +452,6 @@ async function startServer() {
 
     const isCorrect = chosenIndex === currentQ.correctIndex;
 
-    // Find student and record answer
     let found = false;
     for (const team of room.teams) {
       if (team.members) {
@@ -198,14 +475,15 @@ async function startServer() {
 
     room.lastUpdated = Date.now();
     rooms.set(pin, room);
+    persistRoomsToDisk();
     broadcastRoomUpdate(pin, room);
 
     res.json({ success: true, isCorrect });
   });
 
-  // 5. Server-Sent Events stream for real-time push to students
+  // 5. Server-Sent Events stream for real-time mobile push
   app.get('/api/room/:pin/stream', (req, res) => {
-    const pin = req.params.pin.toUpperCase();
+    const pin = (req.params.pin || '').trim().toUpperCase();
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -218,13 +496,11 @@ async function startServer() {
     const clientSet = sseClients.get(pin)!;
     clientSet.add(res);
 
-    // Send immediate state if room exists
     const room = rooms.get(pin);
     if (room) {
       res.write(`data: ${JSON.stringify({ type: 'STATE_UPDATE', state: room })}\n\n`);
     }
 
-    // Ping to keep connection alive
     const pingInterval = setInterval(() => {
       try {
         res.write(': ping\n\n');

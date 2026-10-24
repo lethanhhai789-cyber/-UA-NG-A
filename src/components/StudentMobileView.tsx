@@ -142,19 +142,30 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
       localStorage.setItem('THPT_STUDENT_CLASS', className.trim() || '12A1');
     } catch {}
 
-    // First try to fetch room
-    const fetchedRoom = await syncChannel.fetchRoomFromServer(cleanPin);
+    // Try to fetch room with retries in case teacher screen is initializing
+    let fetchedRoom: RoomState | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      fetchedRoom = await syncChannel.fetchRoomFromServer(cleanPin);
+      if (fetchedRoom) break;
+      if (attempt < 3) {
+        await new Promise((r) => setTimeout(r, 600));
+      }
+    }
+
     if (!fetchedRoom) {
       const localRoom = syncChannel.getRoomFromStorage(cleanPin);
-      if (!localRoom) {
-        alert(`Không tìm thấy phòng thi với mã PIN: ${cleanPin}. Vui lòng kiểm tra lại mã do giáo viên cung cấp!`);
-        setIsConnecting(false);
-        return;
+      if (localRoom) {
+        fetchedRoom = localRoom;
       }
-      setRoomState(localRoom);
-    } else {
-      setRoomState(fetchedRoom);
     }
+
+    if (!fetchedRoom) {
+      alert(`Chưa tìm thấy phòng thi với mã PIN: ${cleanPin}.\n\nThầy/Cô vui lòng mở Màn hình Giáo viên (Host) để khởi tạo phòng trước, sau đó học sinh bấm "VÀO PHÒNG THI" là sẽ kết nối thành công!`);
+      setIsConnecting(false);
+      return;
+    }
+
+    setRoomState(fetchedRoom);
 
     // Join room
     const studentPayload = {
@@ -164,6 +175,7 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
       roomPin: cleanPin,
     };
 
+    const serverStudent = await syncChannel.joinRoomOnServer(studentPayload);
     syncChannel.broadcast({
       type: 'STUDENT_JOIN',
       student: studentPayload,

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { CameraMode, Question, RaceReportData, RoomState, Student, SubjectId, Team } from './types';
+import { CameraMode, Question, RaceReportData, RoomState, Student, SubjectId, Team, Teacher } from './types';
 import { DEFAULT_TEAMS_CONFIG, SAMPLE_QUESTIONS } from './services/questionsData';
 import { syncChannel } from './services/syncChannel';
 import { sound } from './services/soundEffects';
@@ -8,27 +8,52 @@ import { TeacherHostView } from './components/TeacherHostView';
 import { StudentMobileView } from './components/StudentMobileView';
 import { QuestionBankModal } from './components/QuestionBankModal';
 import { RaceReportModal } from './components/RaceReportModal';
-import { Monitor, Smartphone, BookOpen, Layers } from 'lucide-react';
+import { TeacherAuthModal } from './components/TeacherAuthModal';
+import { Monitor, Smartphone, BookOpen, Layers, ShieldCheck, Lock, LogOut } from 'lucide-react';
 
 export default function App() {
-  // Read URL params: If opened with ?role=student or ?pin=... or #/student, default to student view!
+  // Stored Teacher Session
+  const [currentTeacher, setCurrentTeacher] = useState<Teacher | null>(() => {
+    try {
+      const stored = localStorage.getItem('THPT_TEACHER_SESSION');
+      if (stored) {
+        const parsed = JSON.parse(stored) as Teacher;
+        if (parsed && parsed.status === 'approved') {
+          return parsed;
+        }
+      }
+    } catch {}
+    return null;
+  });
+
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+
+  // Initial view mode: MUST DEFAULT TO STUDENT FOR ANYONE WHO VISITS OR COPIES LINK!
+  // Only approved logged-in teachers can access Host view!
   const getInitialViewMode = (): 'host' | 'student' | 'split' => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       const role = params.get('role');
-      const pin = params.get('pin') || params.get('join') || params.get('room');
-      if (role === 'student' || pin || window.location.hash.includes('student')) {
+      // If someone has ?role=student or ?pin=..., strictly student
+      if (role === 'student' || params.has('pin')) {
         return 'student';
       }
+      // If teacher is logged in and visits without student param, open host
+      try {
+        const stored = localStorage.getItem('THPT_TEACHER_SESSION');
+        if (stored) {
+          const parsed = JSON.parse(stored) as Teacher;
+          if (parsed && parsed.status === 'approved' && role !== 'student') {
+            return 'host';
+          }
+        }
+      } catch {}
     }
-    return 'host';
+    // Default to student for all copied links and visitors
+    return 'student';
   };
 
-  // Navigation / View mode: 'host' (Teacher/Projector), 'student' (Mobile exam app), 'split' (Host + Student side by side)
   const [viewMode, setViewMode] = useState<'host' | 'student' | 'split'>(getInitialViewMode);
-  const isDirectStudentLink = typeof window !== 'undefined' && 
-    (new URLSearchParams(window.location.search).get('role') === 'student' || 
-     new URLSearchParams(window.location.search).has('pin'));
 
   // Question bank state
   const [allQuestions, setAllQuestions] = useState<Question[]>(SAMPLE_QUESTIONS);
@@ -39,7 +64,12 @@ export default function App() {
 
   // Generate initial room
   const generateInitialRoom = useCallback((subject: SubjectId = 'toan', teamCount: number = 4): RoomState => {
-    const randomPin = Math.floor(100000 + Math.random() * 900000).toString();
+    // Check if there was an active room pin
+    let pin = syncChannel.getLatestRoomPin();
+    if (!pin) {
+      pin = Math.floor(100000 + Math.random() * 900000).toString();
+    }
+
     const subjectQuestions = allQuestions.filter((q) => q.subject === subject);
     const questionsToUse = subjectQuestions.length > 0 ? subjectQuestions : allQuestions.slice(0, 5);
 
@@ -64,7 +94,7 @@ export default function App() {
     }));
 
     return {
-      roomPin: randomPin,
+      roomPin: pin,
       title: 'Vòng Đua Khởi Động Ôn Thi THPT Quốc Gia',
       subject: subject,
       totalTeams: teamCount,
@@ -82,13 +112,21 @@ export default function App() {
 
   const [roomState, setRoomState] = useState<RoomState>(() => generateInitialRoom('toan', 4));
 
-  // Sync state broadcast whenever roomState changes
+  // Continuous room heartbeat to server so students NEVER get "room not found"
   useEffect(() => {
     syncChannel.broadcast({
       type: 'STATE_UPDATE',
       state: roomState,
     });
     syncChannel.saveRoomToStorage(roomState);
+    syncChannel.saveRoomToServer(roomState);
+
+    // Heartbeat every 2.5s
+    const heartbeat = window.setInterval(() => {
+      syncChannel.saveRoomToServer(roomState);
+    }, 2500);
+
+    return () => clearInterval(heartbeat);
   }, [roomState]);
 
   // Subscribe to real-time sync events (Student Join & Student Answer)
@@ -96,15 +134,13 @@ export default function App() {
     const unsub = syncChannel.subscribe((msg) => {
       if (msg.type === 'STUDENT_JOIN') {
         const studentData = msg.student;
-        if (studentData.roomPin === roomState.roomPin) {
+        if (studentData.roomPin.toUpperCase() === roomState.roomPin.toUpperCase()) {
           setRoomState((prev) => {
-            // Check if already in
             let allMembers = prev.teams.flatMap((t) => t.members);
             if (allMembers.some((m) => m.id === studentData.id)) {
               return prev;
             }
 
-            // Assign to team with fewest members
             const sortedTeams = [...prev.teams].sort((a, b) => a.members.length - b.members.length);
             const targetTeam = sortedTeams[0] || prev.teams[0];
 
@@ -135,7 +171,7 @@ export default function App() {
           });
         }
       } else if (msg.type === 'STUDENT_ANSWER') {
-        if (msg.roomPin === roomState.roomPin) {
+        if (msg.roomPin.toUpperCase() === roomState.roomPin.toUpperCase()) {
           setRoomState((prev) => {
             const currentQ = prev.questions[prev.currentQuestionIndex];
             if (!currentQ || currentQ.id !== msg.questionId) return prev;
@@ -180,6 +216,34 @@ export default function App() {
 
     return () => unsub();
   }, [roomState.roomPin]);
+
+  // Handle Teacher Login Success
+  const handleLoginSuccess = (teacher: Teacher, token: string) => {
+    setCurrentTeacher(teacher);
+    try {
+      localStorage.setItem('THPT_TEACHER_SESSION', JSON.stringify(teacher));
+      localStorage.setItem('THPT_TEACHER_TOKEN', token);
+    } catch {}
+    setViewMode('host');
+  };
+
+  const handleLogout = () => {
+    setCurrentTeacher(null);
+    try {
+      localStorage.removeItem('THPT_TEACHER_SESSION');
+      localStorage.removeItem('THPT_TEACHER_TOKEN');
+    } catch {}
+    setViewMode('student');
+  };
+
+  // Safe Mode Switcher (Checks Teacher Authentication)
+  const handleSwitchToHost = () => {
+    if (!currentTeacher || currentTeacher.status !== 'approved') {
+      setIsAuthModalOpen(true);
+    } else {
+      setViewMode('host');
+    }
+  };
 
   // Handle Subject change
   const handleSelectSubject = (subj: SubjectId) => {
@@ -273,91 +337,119 @@ export default function App() {
               </span>
             </h1>
             <p className="text-[11px] text-slate-400">
-              {viewMode === 'student' ? 'Hệ thống làm bài thi trắc nghiệm trực tuyến thời gian thực' : 'Hệ thống trắc nghiệm phân hóa Bloom & vượt rào Vận dụng cao'}
+              {viewMode === 'student' ? 'Thi trắc nghiệm thời gian thực • Mặc định cho mọi đường link chia sẻ' : 'Hệ thống trắc nghiệm phân hóa Bloom & vượt rào Vận dụng cao'}
             </p>
           </div>
         </div>
 
-        {/* View Mode Switcher */}
-        {!isDirectStudentLink ? (
-          <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 p-1 rounded-xl">
-            <button
-              onClick={() => setViewMode('host')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
-                viewMode === 'host'
-                  ? 'bg-amber-500 text-slate-950 shadow-md'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-800'
-              }`}
-            >
-              <Monitor className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Màn Hình Giáo Viên (Host)</span>
-              <span className="sm:hidden">Host</span>
-            </button>
+        {/* Navigation & Teacher Authentication Controls */}
+        <div className="flex items-center gap-2">
+          
+          {/* If teacher is logged in: Show Full Controls */}
+          {currentTeacher ? (
+            <div className="flex items-center gap-2">
+              <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs">
+                <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                <span className="font-semibold text-slate-200">{currentTeacher.name}</span>
+                <span className="text-slate-500">|</span>
+                <span className="text-slate-400">{currentTeacher.school}</span>
+              </div>
 
-            <button
-              onClick={() => setViewMode('student')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
-                viewMode === 'student'
-                  ? 'bg-amber-500 text-slate-950 shadow-md'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-800'
-              }`}
-            >
-              <Smartphone className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Giao Diện Sĩ Tử (Mobile)</span>
-              <span className="sm:hidden">Sĩ tử</span>
-            </button>
+              <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 p-1 rounded-xl">
+                <button
+                  onClick={() => setViewMode('host')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                    viewMode === 'host'
+                      ? 'bg-amber-500 text-slate-950 shadow-md'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  }`}
+                >
+                  <Monitor className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Màn Chiếu Host</span>
+                </button>
 
-            <button
-              onClick={() => setViewMode('split')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
-                viewMode === 'split'
-                  ? 'bg-amber-500 text-slate-950 shadow-md'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-800'
-              }`}
-              title="Xem đồng thời màn hình Giáo viên và Sĩ tử để đánh giá tương tác thời gian thực"
-            >
-              <Layers className="w-3.5 h-3.5" />
-              <span className="hidden md:inline">Xem Đồng Thời (Split)</span>
-            </button>
-          </div>
-        ) : (
-          <div className="text-xs text-slate-400 flex items-center gap-2">
-            <span className="px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-semibold">
-              ● Đã kết nối phòng thi
-            </span>
-            <button
-              onClick={() => {
-                window.location.href = window.location.origin;
-              }}
-              className="text-[11px] text-slate-500 hover:text-slate-300 underline transition"
-            >
-              Đổi sang Màn hình Giáo viên
-            </button>
-          </div>
-        )}
+                <button
+                  onClick={() => setViewMode('student')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                    viewMode === 'student'
+                      ? 'bg-amber-500 text-slate-950 shadow-md'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  }`}
+                >
+                  <Smartphone className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Màn Sĩ Tử</span>
+                </button>
 
-        {/* Right Action: Open Question Bank (only for host or non-student direct link) */}
-        {!isDirectStudentLink && (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setIsQuestionBankOpen(true)}
-              className="px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition shadow-sm"
-            >
-              <BookOpen className="w-3.5 h-3.5 text-amber-400" />
-              <span className="hidden sm:inline">Ngân Hàng Đề Thi</span>
-            </button>
-          </div>
-        )}
+                <button
+                  onClick={() => setViewMode('split')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                    viewMode === 'split'
+                      ? 'bg-amber-500 text-slate-950 shadow-md'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  }`}
+                  title="Xem đồng thời màn hình Giáo viên và Sĩ tử"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span className="hidden md:inline">Split Demo</span>
+                </button>
+              </div>
+
+              <button
+                onClick={() => setIsQuestionBankOpen(true)}
+                className="hidden sm:flex px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-xs font-semibold text-slate-200 items-center gap-1.5 transition shadow-sm"
+              >
+                <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+                <span>Ngân Hàng Đề</span>
+              </button>
+
+              <button
+                onClick={handleLogout}
+                className="p-2 rounded-xl bg-slate-900 hover:bg-rose-950/60 hover:text-rose-400 border border-slate-800 text-slate-400 transition"
+                title="Đăng xuất tài khoản Giáo viên"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            /* If NOT logged in (Normal users & Students) */
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setIsAuthModalOpen(true)}
+                className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-amber-500/40 text-amber-300 text-xs font-bold flex items-center gap-1.5 shadow-md transition cursor-pointer"
+              >
+                <Lock className="w-3.5 h-3.5" />
+                <span>Dành Cho Giáo Viên (Đăng Nhập)</span>
+              </button>
+            </div>
+          )}
+
+        </div>
 
       </header>
 
       {/* Main View Container */}
       <main className="flex-1 flex flex-col relative overflow-hidden">
         
-        {/* VIEW 1: HOST TEACHER SCREEN */}
+        {/* VIEW 1: HOST TEACHER SCREEN (Protected) */}
         {viewMode === 'host' && (
           <div className="flex-1 flex flex-col">
-            {roomState.status === 'lobby' ? (
+            {!currentTeacher ? (
+              <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-4">
+                <div className="w-16 h-16 rounded-3xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center">
+                  <Lock className="w-8 h-8" />
+                </div>
+                <h2 className="text-xl font-bold text-white">YÊU CẦU XÁC THỰC GIÁO VIÊN</h2>
+                <p className="text-xs text-slate-400 max-w-md">
+                  Chỉ những tài khoản giáo viên đã đăng ký và được xác nhận quyền mới có thể truy cập màn hình quản trị này.
+                </p>
+                <button
+                  onClick={() => setIsAuthModalOpen(true)}
+                  className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg transition"
+                >
+                  Đăng Nhập / Đăng Ký Xác Nhận Giáo Viên
+                </button>
+              </div>
+            ) : roomState.status === 'lobby' ? (
               <div className="flex-1 p-4 sm:p-6 overflow-y-auto">
                 <LobbySetup
                   roomPin={roomState.roomPin}
@@ -386,17 +478,17 @@ export default function App() {
           </div>
         )}
 
-        {/* VIEW 2: STUDENT MOBILE APP SCREEN */}
+        {/* VIEW 2: STUDENT MOBILE APP SCREEN (Default for all copy link users) */}
         {viewMode === 'student' && (
           <div className="flex-1 flex flex-col">
             <StudentMobileView
               initialRoomPin={roomState.roomPin}
-              onBackToHost={() => setViewMode('host')}
+              onBackToHost={currentTeacher ? () => setViewMode('host') : undefined}
             />
           </div>
         )}
 
-        {/* VIEW 3: SPLIT DEMO VIEW (Host on left, Student Phone on right) */}
+        {/* VIEW 3: SPLIT DEMO VIEW */}
         {viewMode === 'split' && (
           <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 overflow-hidden">
             {/* Host half (8 cols) */}
@@ -450,6 +542,15 @@ export default function App() {
 
       </main>
 
+      {/* Teacher Auth & Approval Modal */}
+      <TeacherAuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        currentTeacher={currentTeacher}
+        onLoginSuccess={handleLoginSuccess}
+        onLogout={handleLogout}
+      />
+
       {/* Question Bank Modal */}
       <QuestionBankModal
         isOpen={isQuestionBankOpen}
@@ -457,7 +558,6 @@ export default function App() {
         questions={allQuestions}
         onUpdateQuestions={(newQs) => {
           setAllQuestions(newQs);
-          // Update room questions as well
           setRoomState((prev) => ({
             ...prev,
             questions: newQs.filter((q) => q.subject === prev.subject),
