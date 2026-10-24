@@ -11,8 +11,24 @@ import { RaceReportModal } from './components/RaceReportModal';
 import { Monitor, Smartphone, BookOpen, Layers } from 'lucide-react';
 
 export default function App() {
+  // Read URL params: If opened with ?role=student or ?pin=... or #/student, default to student view!
+  const getInitialViewMode = (): 'host' | 'student' | 'split' => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const role = params.get('role');
+      const pin = params.get('pin') || params.get('join') || params.get('room');
+      if (role === 'student' || pin || window.location.hash.includes('student')) {
+        return 'student';
+      }
+    }
+    return 'host';
+  };
+
   // Navigation / View mode: 'host' (Teacher/Projector), 'student' (Mobile exam app), 'split' (Host + Student side by side)
-  const [viewMode, setViewMode] = useState<'host' | 'student' | 'split'>('host');
+  const [viewMode, setViewMode] = useState<'host' | 'student' | 'split'>(getInitialViewMode);
+  const isDirectStudentLink = typeof window !== 'undefined' && 
+    (new URLSearchParams(window.location.search).get('role') === 'student' || 
+     new URLSearchParams(window.location.search).has('pin'));
 
   // Question bank state
   const [allQuestions, setAllQuestions] = useState<Question[]>(SAMPLE_QUESTIONS);
@@ -250,68 +266,88 @@ export default function App() {
           <div>
             <h1 className="text-base font-black tracking-tight text-white flex items-center gap-2">
               <span>Đua Ngựa Tri Thức THPT</span>
-              <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-400">
-                3D EdTech
+              <span className={`text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full ${
+                viewMode === 'student' ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400' : 'bg-amber-500/15 border border-amber-500/30 text-amber-400'
+              }`}>
+                {viewMode === 'student' ? 'Cổng Sĩ Tử' : 'Màn Chiếu Giáo Viên'}
               </span>
             </h1>
             <p className="text-[11px] text-slate-400">
-              Hệ thống trắc nghiệm phân hóa Bloom & vượt rào Vận dụng cao
+              {viewMode === 'student' ? 'Hệ thống làm bài thi trắc nghiệm trực tuyến thời gian thực' : 'Hệ thống trắc nghiệm phân hóa Bloom & vượt rào Vận dụng cao'}
             </p>
           </div>
         </div>
 
-        {/* View Mode Switcher (Host vs Student vs Split) */}
-        <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 p-1 rounded-xl">
-          <button
-            onClick={() => setViewMode('host')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
-              viewMode === 'host'
-                ? 'bg-amber-500 text-slate-950 shadow-md'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800'
-            }`}
-          >
-            <Monitor className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Màn Hình Giáo Viên (Host)</span>
-            <span className="sm:hidden">Host</span>
-          </button>
+        {/* View Mode Switcher */}
+        {!isDirectStudentLink ? (
+          <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 p-1 rounded-xl">
+            <button
+              onClick={() => setViewMode('host')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                viewMode === 'host'
+                  ? 'bg-amber-500 text-slate-950 shadow-md'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800'
+              }`}
+            >
+              <Monitor className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Màn Hình Giáo Viên (Host)</span>
+              <span className="sm:hidden">Host</span>
+            </button>
 
-          <button
-            onClick={() => setViewMode('student')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
-              viewMode === 'student'
-                ? 'bg-amber-500 text-slate-950 shadow-md'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800'
-            }`}
-          >
-            <Smartphone className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Giao Diện Sĩ Tử (Mobile)</span>
-            <span className="sm:hidden">Sĩ tử</span>
-          </button>
+            <button
+              onClick={() => setViewMode('student')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                viewMode === 'student'
+                  ? 'bg-amber-500 text-slate-950 shadow-md'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800'
+              }`}
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Giao Diện Sĩ Tử (Mobile)</span>
+              <span className="sm:hidden">Sĩ tử</span>
+            </button>
 
-          <button
-            onClick={() => setViewMode('split')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
-              viewMode === 'split'
-                ? 'bg-amber-500 text-slate-950 shadow-md'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800'
-            }`}
-            title="Xem đồng thời màn hình Giáo viên và Sĩ tử để đánh giá tương tác thời gian thực"
-          >
-            <Layers className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">Xem Đồng Thời (Split)</span>
-          </button>
-        </div>
+            <button
+              onClick={() => setViewMode('split')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                viewMode === 'split'
+                  ? 'bg-amber-500 text-slate-950 shadow-md'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800'
+              }`}
+              title="Xem đồng thời màn hình Giáo viên và Sĩ tử để đánh giá tương tác thời gian thực"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">Xem Đồng Thời (Split)</span>
+            </button>
+          </div>
+        ) : (
+          <div className="text-xs text-slate-400 flex items-center gap-2">
+            <span className="px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-semibold">
+              ● Đã kết nối phòng thi
+            </span>
+            <button
+              onClick={() => {
+                window.location.href = window.location.origin;
+              }}
+              className="text-[11px] text-slate-500 hover:text-slate-300 underline transition"
+            >
+              Đổi sang Màn hình Giáo viên
+            </button>
+          </div>
+        )}
 
-        {/* Right Action: Open Question Bank */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setIsQuestionBankOpen(true)}
-            className="px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition shadow-sm"
-          >
-            <BookOpen className="w-3.5 h-3.5 text-amber-400" />
-            <span className="hidden sm:inline">Ngân Hàng Đề Thi</span>
-          </button>
-        </div>
+        {/* Right Action: Open Question Bank (only for host or non-student direct link) */}
+        {!isDirectStudentLink && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsQuestionBankOpen(true)}
+              className="px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition shadow-sm"
+            >
+              <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden sm:inline">Ngân Hàng Đề Thi</span>
+            </button>
+          </div>
+        )}
 
       </header>
 

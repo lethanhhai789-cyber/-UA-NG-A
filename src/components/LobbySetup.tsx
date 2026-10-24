@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { SubjectId, Team, Student } from '../types';
 import { SUBJECT_INFO } from '../services/questionsData';
-import { Play, Users, BookOpen, Settings2, Sparkles, Copy, ExternalLink, Bot } from 'lucide-react';
+import { Play, Users, BookOpen, Settings2, Sparkles, Copy, ExternalLink, Bot, Check, Share2, Smartphone, Monitor } from 'lucide-react';
 
 interface LobbySetupProps {
   roomPin: string;
@@ -32,58 +32,156 @@ export const LobbySetup: React.FC<LobbySetupProps> = ({
   onStartRace,
   onOpenStudentTab,
 }) => {
-  const [copied, setCopied] = React.useState(false);
+  const [copiedPin, setCopiedPin] = useState(false);
+  const [copiedStudentLink, setCopiedStudentLink] = useState(false);
+
+  // Compute absolute student link
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const studentInviteLink = `${origin}/?role=student&pin=${roomPin}`;
+  const teacherHostLink = `${origin}/?role=host`;
 
   const copyPin = () => {
     navigator.clipboard.writeText(roomPin);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setCopiedPin(true);
+    setTimeout(() => setCopiedPin(false), 2000);
+  };
+
+  const copyStudentLink = () => {
+    navigator.clipboard.writeText(studentInviteLink);
+    setCopiedStudentLink(true);
+    setTimeout(() => setCopiedStudentLink(false), 2500);
+  };
+
+  const openStudentNewTab = () => {
+    window.open(studentInviteLink, '_blank');
   };
 
   return (
     <div className="w-full max-w-6xl mx-auto space-y-6">
       
-      {/* Top Hero Banner & Room PIN Projector Display */}
-      <div className="p-6 sm:p-8 rounded-3xl bg-linear-to-br from-slate-900 via-slate-900 to-amber-950/40 border border-slate-800 shadow-2xl relative overflow-hidden flex flex-col md:flex-row items-center justify-between gap-6">
-        <div className="space-y-2 text-center md:text-left z-10">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-bold uppercase tracking-wider">
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>Màn Hình Máy Chiếu Lớp Học (Host Teacher)</span>
+      {/* SECTION: 2 DEDICATED SEPARATE LINKS (TEACHER vs STUDENT) */}
+      <div className="bg-slate-900 border-2 border-amber-500/50 rounded-3xl p-6 sm:p-7 shadow-2xl space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center font-black text-xl shadow-lg">
+              🔗
+            </div>
+            <div>
+              <h2 className="text-lg font-black text-white flex items-center gap-2">
+                2 ĐƯỜNG LINK RIÊNG BIỆT CHO PHÒNG THI #{roomPin}
+              </h2>
+              <p className="text-xs text-slate-300">
+                Phân định rõ ràng: Link gửi cho Học sinh và Link hiển thị Màn chiếu Giáo viên
+              </p>
+            </div>
           </div>
-          <h1 className="text-3xl sm:text-4xl font-black text-white tracking-tight">
-            ĐUA NGỰA TRI THỨC THPT 3D
-          </h1>
-          <p className="text-sm text-slate-300 max-w-xl">
-            Học sinh quét mã hoặc truy cập màn hình Sĩ tử, nhập mã PIN để tham gia thi đấu thời gian thực. Câu hỏi "Vận dụng cao" kích hoạt chiến mã tung vó vượt rào!
-          </p>
-        </div>
 
-        {/* Big PIN Display */}
-        <div className="bg-slate-950/90 border-2 border-amber-500/40 rounded-2xl p-5 text-center min-w-[240px] shadow-xl relative group">
-          <span className="text-xs uppercase font-bold text-slate-400 tracking-wider block mb-1">
-            Mã Phòng Thi (Room PIN)
-          </span>
-          <div className="text-4xl sm:text-5xl font-mono font-black tracking-widest text-amber-400">
-            {roomPin}
-          </div>
-          
-          <div className="mt-3 flex items-center justify-center gap-2">
+          <div className="flex items-center gap-2 bg-slate-950 px-4 py-2 rounded-xl border border-slate-800">
+            <span className="text-xs text-slate-400 font-semibold">MÃ PHÒNG (PIN):</span>
+            <span className="text-xl font-mono font-black text-amber-400 tracking-wider">{roomPin}</span>
             <button
               onClick={copyPin}
-              className="px-3 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-xs text-slate-300 hover:text-white flex items-center gap-1 border border-slate-800 transition"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition ml-1"
+              title="Sao chép PIN"
             >
-              <Copy className="w-3 h-3" />
-              <span>{copied ? 'Đã sao chép' : 'Sao chép PIN'}</span>
-            </button>
-            <button
-              onClick={onOpenStudentTab}
-              className="px-3 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-xs text-amber-300 flex items-center gap-1 border border-amber-500/30 transition"
-              title="Mở thêm tab học sinh để thử nghiệm trực tiếp"
-            >
-              <ExternalLink className="w-3 h-3" />
-              <span>Thử tab Học sinh</span>
+              {copiedPin ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
             </button>
           </div>
+        </div>
+
+        {/* 2 Separate Link Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+          
+          {/* Card 1: Student Link (Highlighted) */}
+          <div className="p-4 rounded-2xl bg-linear-to-br from-emerald-950/40 to-slate-950 border border-emerald-500/40 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-black uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                <Smartphone className="w-4 h-4" />
+                <span>ĐƯỜNG LINK GỬI CHO HỌC SINH (SĨ TỬ)</span>
+              </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                Không cần đăng ký
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-emerald-300 break-all select-all flex items-center justify-between gap-2">
+              <span className="truncate">{studentInviteLink}</span>
+            </div>
+
+            <p className="text-[11px] text-slate-300 leading-relaxed">
+              👉 <strong>Cách dùng:</strong> Giáo viên gửi link này qua Zalo/Classroom. Học sinh bấm vào sẽ <strong>vào thẳng giao diện làm bài</strong>, mã PIN tự động điền, không vào trang giáo viên!
+            </p>
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                onClick={copyStudentLink}
+                className="flex-1 py-2.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/20 transition cursor-pointer"
+              >
+                {copiedStudentLink ? (
+                  <>
+                    <Check className="w-4 h-4" />
+                    <span>ĐÃ SAO CHÉP LINK HỌC SINH!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-4 h-4" />
+                    <span>SAO CHÉP LINK MỜI HỌC SINH</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                onClick={openStudentNewTab}
+                className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold flex items-center gap-1 border border-slate-700 transition"
+                title="Mở tab học sinh mới để thử"
+              >
+                <ExternalLink className="w-4 h-4" />
+                <span className="hidden sm:inline">Thử tab mới</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Card 2: Teacher Host Link */}
+          <div className="p-4 rounded-2xl bg-linear-to-br from-blue-950/40 to-slate-950 border border-blue-500/40 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-black uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
+                <Monitor className="w-4 h-4" />
+                <span>ĐƯỜNG LINK MÀN CHIẾU GIÁO VIÊN (HOST)</span>
+              </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                Dành cho Giáo viên
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-blue-300 break-all select-all">
+              {teacherHostLink}
+            </div>
+
+            <p className="text-[11px] text-slate-300 leading-relaxed">
+              👉 Dùng trên máy tính kết nối Máy chiếu / Smart TV trong lớp để chiếu 3D trường đua, âm thanh kèn lệnh, điều khiển câu hỏi và bảng xếp hạng.
+            </p>
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(teacherHostLink);
+                  alert('Đã sao chép Link Giáo viên!');
+                }}
+                className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold flex items-center gap-1.5 border border-slate-700 transition"
+              >
+                <Copy className="w-4 h-4" />
+                <span>Sao chép Link Giáo viên</span>
+              </button>
+
+              <button
+                onClick={onOpenStudentTab}
+                className="py-2.5 px-3 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 text-xs font-bold flex items-center gap-1.5 border border-amber-500/30 transition"
+              >
+                <span>Xem Chia Đôi Màn Hình (Demo)</span>
+              </button>
+            </div>
+          </div>
+
         </div>
       </div>
 
@@ -201,8 +299,9 @@ export const LobbySetup: React.FC<LobbySetupProps> = ({
 
             <div className="max-h-36 overflow-y-auto space-y-1.5 pr-1">
               {students.length === 0 ? (
-                <div className="text-center py-6 text-slate-500 text-xs italic">
-                  Đang chờ học sinh quét mã và nhập Room PIN...
+                <div className="text-center py-6 text-slate-400 text-xs italic leading-relaxed">
+                  Đang chờ học sinh quét mã hoặc bấm link để vào phòng...<br />
+                  <span className="text-[11px] text-amber-400">💡 Thầy cô gửi link ở trên cho các em nhé!</span>
                 </div>
               ) : (
                 students.map((s) => {
@@ -230,7 +329,7 @@ export const LobbySetup: React.FC<LobbySetupProps> = ({
 
           <button
             onClick={onStartRace}
-            className="w-full py-4 rounded-xl bg-linear-to-r from-amber-500 via-yellow-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-sm tracking-wider shadow-lg shadow-amber-500/25 flex items-center justify-center gap-2 transition active:scale-98"
+            className="w-full py-4 rounded-xl bg-linear-to-r from-amber-500 via-yellow-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-sm tracking-wider shadow-lg shadow-amber-500/25 flex items-center justify-center gap-2 transition active:scale-98 cursor-pointer"
           >
             <Play className="w-5 h-5 fill-slate-950" />
             <span>KÈN LỆNH XUẤT TRẬN & BẮT ĐẦU ĐUA</span>

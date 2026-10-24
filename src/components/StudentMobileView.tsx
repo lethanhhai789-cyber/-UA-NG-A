@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { RoomState, Student, Team } from '../types';
 import { syncChannel } from '../services/syncChannel';
 import { sound } from '../services/soundEffects';
 import { RaceTrack3D } from './3d/RaceTrack3D';
-import { CheckCircle2, XCircle, Zap, Eye, Smartphone, Radio, UserCheck } from 'lucide-react';
+import { CheckCircle2, XCircle, Zap, Eye, Smartphone, Radio, UserCheck, RefreshCw } from 'lucide-react';
 
 interface StudentMobileViewProps {
   initialRoomPin?: string;
@@ -14,43 +14,96 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
   initialRoomPin = '',
   onBackToHost,
 }) => {
-  const [roomPin, setRoomPin] = useState(initialRoomPin || syncChannel.getLatestRoomPin() || '');
-  const [studentName, setStudentName] = useState('');
-  const [className, setClassName] = useState('12A1');
-  const [isJoined, setIsJoined] = useState(false);
-  const [studentId, setStudentId] = useState<string>('');
-  const [assignedTeam, setAssignedTeam] = useState<Team | null>(null);
+  // Read PIN from URL query param if available (?pin=... or ?join=...)
+  const getInitialPin = () => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const urlPin = params.get('pin') || params.get('room') || params.get('join');
+      if (urlPin) return urlPin.toUpperCase();
+    }
+    return initialRoomPin || syncChannel.getLatestRoomPin() || '';
+  };
 
+  const [roomPin, setRoomPin] = useState(getInitialPin);
+  const [studentName, setStudentName] = useState(() => {
+    try {
+      return localStorage.getItem('THPT_STUDENT_NAME') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [className, setClassName] = useState(() => {
+    try {
+      return localStorage.getItem('THPT_STUDENT_CLASS') || '12A1';
+    } catch {
+      return '12A1';
+    }
+  });
+
+  const [isJoined, setIsJoined] = useState(false);
+  const [studentId, setStudentId] = useState<string>(() => {
+    try {
+      const stored = localStorage.getItem('THPT_STUDENT_ID');
+      if (stored) return stored;
+    } catch {}
+    const newId = `s_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    try {
+      localStorage.setItem('THPT_STUDENT_ID', newId);
+    } catch {}
+    return newId;
+  });
+
+  const [assignedTeam, setAssignedTeam] = useState<Team | null>(null);
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [chosenAnswer, setChosenAnswer] = useState<number | null>(null);
   const [answeredTimeSec, setAnsweredTimeSec] = useState<number>(0);
   const [show3DTrack, setShow3DTrack] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
 
-  // Subscribe to real-time room updates
+  // Sync with Server & BroadcastChannel
   useEffect(() => {
+    if (!roomPin) return;
+    const cleanPin = roomPin.trim().toUpperCase();
+
+    // 1. Connect SSE stream to server for live push
+    syncChannel.connectSse(cleanPin);
+
+    // 2. Initial fetch from server
+    syncChannel.fetchRoomFromServer(cleanPin).then((serverRoom) => {
+      if (serverRoom) {
+        setRoomState(serverRoom);
+      }
+    });
+
+    // 3. Subscribe to sync events
     const unsub = syncChannel.subscribe((msg) => {
       if (msg.type === 'STATE_UPDATE') {
-        if (!roomPin || msg.state.roomPin === roomPin) {
+        if (!cleanPin || msg.state.roomPin.toUpperCase() === cleanPin) {
           setRoomState(msg.state);
         }
       }
     });
 
-    // Check localStorage initial
-    if (roomPin) {
-      const stored = syncChannel.getRoomFromStorage(roomPin);
-      if (stored) {
-        setRoomState(stored);
-      }
-    }
+    // 4. Polling fallback every 1.5s in case SSE is interrupted
+    const pollInterval = window.setInterval(() => {
+      syncChannel.fetchRoomFromServer(cleanPin).then((res) => {
+        if (res) {
+          setRoomState(res);
+        }
+      });
+    }, 1500);
 
-    return () => unsub();
+    return () => {
+      unsub();
+      clearInterval(pollInterval);
+      syncChannel.disconnectSse();
+    };
   }, [roomPin]);
 
   // Update assigned team whenever room state changes
   useEffect(() => {
     if (roomState && studentId) {
-      const team = roomState.teams.find((t) => t.members.some((m) => m.id === studentId));
+      const team = roomState.teams.find((t) => t.members && t.members.some((m) => m.id === studentId));
       if (team) {
         setAssignedTeam(team);
       }
@@ -58,41 +111,79 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
   }, [roomState, studentId]);
 
   // Reset chosen answer on new question
+  const prevQIndexRef = useRef<number>(-1);
   useEffect(() => {
-    setChosenAnswer(null);
+    if (roomState && roomState.currentQuestionIndex !== prevQIndexRef.current) {
+      prevQIndexRef.current = roomState.currentQuestionIndex;
+      setChosenAnswer(null);
+      setAnsweredTimeSec(0);
+    }
   }, [roomState?.currentQuestionIndex]);
 
-  const handleJoinRoom = (e: React.FormEvent) => {
+  // Reset chosen answer when room resets to lobby
+  useEffect(() => {
+    if (roomState?.status === 'lobby') {
+      setChosenAnswer(null);
+    }
+  }, [roomState?.status]);
+
+  const handleJoinRoom = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!studentName.trim() || !roomPin.trim()) {
-      alert('Vui lòng nhập đầy đủ Mã phòng PIN và Họ tên!');
+      alert('Vui lòng nhập đầy đủ Mã phòng thi và Họ tên của bạn!');
       return;
     }
 
-    const sId = `student_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-    setStudentId(sId);
+    const cleanPin = roomPin.trim().toUpperCase();
+    setIsConnecting(true);
+
+    try {
+      localStorage.setItem('THPT_STUDENT_NAME', studentName.trim());
+      localStorage.setItem('THPT_STUDENT_CLASS', className.trim() || '12A1');
+    } catch {}
+
+    // First try to fetch room
+    const fetchedRoom = await syncChannel.fetchRoomFromServer(cleanPin);
+    if (!fetchedRoom) {
+      const localRoom = syncChannel.getRoomFromStorage(cleanPin);
+      if (!localRoom) {
+        alert(`Không tìm thấy phòng thi với mã PIN: ${cleanPin}. Vui lòng kiểm tra lại mã do giáo viên cung cấp!`);
+        setIsConnecting(false);
+        return;
+      }
+      setRoomState(localRoom);
+    } else {
+      setRoomState(fetchedRoom);
+    }
+
+    // Join room
+    const studentPayload = {
+      id: studentId,
+      name: studentName.trim(),
+      className: className.trim() || '12A1',
+      roomPin: cleanPin,
+    };
 
     syncChannel.broadcast({
       type: 'STUDENT_JOIN',
-      student: {
-        id: sId,
-        name: studentName.trim(),
-        className: className.trim() || '12A',
-        roomPin: roomPin.trim(),
-      },
+      student: studentPayload,
     });
 
     setIsJoined(true);
+    setIsConnecting(false);
     sound.playCorrectSound();
   };
 
+  // Student selecting or changing an answer
   const handleSelectOption = (optionIndex: number) => {
-    if (!roomState || chosenAnswer !== null) return;
+    if (!roomState) return;
+    
+    // Students can select or change option as long as question is active
     if (roomState.status !== 'question_active') return;
 
     setChosenAnswer(optionIndex);
-    const timeSpent = roomState.initialTimeLimit - roomState.timeRemaining;
-    setAnsweredTimeSec(Math.max(1, timeSpent));
+    const timeSpent = Math.max(1, roomState.initialTimeLimit - roomState.timeRemaining);
+    setAnsweredTimeSec(timeSpent);
 
     const currentQ = roomState.questions[roomState.currentQuestionIndex];
     if (currentQ) {
@@ -114,7 +205,7 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
   const isRevealed = roomState?.status === 'revealed' || roomState?.status === 'hurdle_replay';
   const isCorrect = chosenAnswer !== null && currentQ && chosenAnswer === currentQ.correctIndex;
 
-  // LOBBY / JOIN FORM
+  // LOBBY / JOIN FORM (NO REGISTRATION REQUIRED)
   if (!isJoined || !roomState) {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col justify-center items-center p-4 text-white">
@@ -129,14 +220,15 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
               CỔNG THI ĐUA NGỰA 3D
             </h1>
             <p className="text-xs text-slate-400 mt-1">
-              Dành cho Sĩ tử THPT ôn luyện trực tuyến qua điện thoại & laptop
+              Giao diện dành riêng cho Sĩ tử THPT • Không cần tạo tài khoản
             </p>
           </div>
 
           <form onSubmit={handleJoinRoom} className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Mã Phòng Thi (Room PIN):
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
+                <span>Mã Phòng Thi (Room PIN):</span>
+                {roomPin && <span className="text-[11px] text-emerald-400 font-mono">✓ Đã lấy từ link</span>}
               </label>
               <input
                 type="text"
@@ -144,7 +236,7 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
                 placeholder="VD: 889988"
                 value={roomPin}
                 onChange={(e) => setRoomPin(e.target.value.toUpperCase())}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-center text-xl font-mono font-bold tracking-widest text-amber-400 focus:outline-none focus:border-amber-500"
+                className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-xl px-4 py-3 text-center text-2xl font-mono font-black tracking-widest text-amber-400 focus:outline-none"
                 required
               />
             </div>
@@ -158,29 +250,37 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
                 placeholder="VD: Nguyễn Văn An"
                 value={studentName}
                 onChange={(e) => setStudentName(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500"
+                className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none"
                 required
               />
             </div>
 
             <div>
               <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Lớp / Trường THPT:
+                Lớp / Trường:
               </label>
               <input
                 type="text"
                 placeholder="VD: 12A1 - THPT Chuyên"
                 value={className}
                 onChange={(e) => setClassName(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500"
+                className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none"
               />
             </div>
 
             <button
               type="submit"
-              className="w-full py-3.5 rounded-xl bg-linear-to-r from-amber-500 via-yellow-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-sm tracking-wide shadow-lg shadow-amber-500/20 transition active:scale-98"
+              disabled={isConnecting}
+              className="w-full py-3.5 rounded-xl bg-linear-to-r from-amber-500 via-yellow-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-sm tracking-wide shadow-lg shadow-amber-500/20 transition active:scale-98 flex items-center justify-center gap-2 cursor-pointer"
             >
-              VÀO PHÒNG THI & NHẬN CHIẾN MÃ
+              {isConnecting ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>ĐANG KẾT NỐI PHÒNG THI...</span>
+                </>
+              ) : (
+                <span>VÀO PHÒNG THI NGAY</span>
+              )}
             </button>
           </form>
 
@@ -188,9 +288,9 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
             <div className="mt-6 pt-4 border-t border-slate-800 text-center">
               <button
                 onClick={onBackToHost}
-                className="text-xs text-slate-400 hover:text-white transition"
+                className="text-xs text-slate-500 hover:text-slate-300 transition"
               >
-                ← Quay lại Màn hình Giáo viên (Host / Máy chiếu)
+                ← Màn hình Giáo viên (Host)
               </button>
             </div>
           )}
@@ -217,9 +317,11 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
               </span>
             </div>
           ) : (
-            <span className="text-xs text-slate-400">Đang gán đội...</span>
+            <span className="text-xs text-amber-400 animate-pulse font-semibold">
+              Đang gán chiến mã...
+            </span>
           )}
-          <span className="text-xs text-slate-400 hidden sm:inline">
+          <span className="text-xs text-slate-300 hidden sm:inline">
             | {studentName} ({className})
           </span>
         </div>
@@ -235,9 +337,9 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
           {onBackToHost && (
             <button
               onClick={onBackToHost}
-              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-400 hover:text-white transition"
+              className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-400 hover:text-white transition"
             >
-              Màn chiếu
+              Host
             </button>
           )}
         </div>
@@ -267,15 +369,16 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
             <div className="w-16 h-16 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 mx-auto flex items-center justify-center animate-bounce">
               <Radio className="w-8 h-8" />
             </div>
-            <h2 className="text-xl font-bold text-white">ĐÃ VÀO PHÒNG THI THÀNH CÔNG</h2>
-            <p className="text-xs text-slate-400 max-w-sm mx-auto">
-              Sĩ tử: <strong className="text-white">{studentName}</strong> ({className}). Hãy chờ giáo viên bấm nút xuất phát trên màn chiếu lớp học!
+            <h2 className="text-xl font-bold text-white">ĐÃ VÀO PHÒNG THI THÀNH CÔNG!</h2>
+            <p className="text-xs text-slate-300 max-w-sm mx-auto leading-relaxed">
+              Sĩ tử: <strong className="text-amber-400">{studentName}</strong> ({className}).<br />
+              Hãy giữ màn hình mở, khi Giáo viên bấm nút <strong className="text-emerald-400">"Kèn Lệnh Xuất Trận"</strong>, đề thi sẽ tự động hiển thị để bạn làm bài ngay!
             </p>
             {assignedTeam && (
-              <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 inline-block text-center">
+              <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 inline-block text-center shadow-lg">
                 <span className="text-[11px] text-slate-400 uppercase tracking-wider block mb-1">Chiến mã đại diện</span>
                 <span className="text-lg font-black" style={{ color: assignedTeam.colorHex }}>
-                  🐎 {assignedTeam.name}
+                  🐎 {assignedTeam.name} (Làn {assignedTeam.laneIndex + 1})
                 </span>
               </div>
             )}
@@ -288,7 +391,7 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
             <div className="w-16 h-16 rounded-2xl bg-amber-500 text-slate-950 font-black text-3xl mx-auto flex items-center justify-center shadow-lg">
               🏆
             </div>
-            <h2 className="text-2xl font-black text-white">VÒNG ĐUA KẾT THÚC</h2>
+            <h2 className="text-2xl font-black text-white">VÒNG ĐUA ĐÃ KẾT THÚC</h2>
             <p className="text-xs text-slate-300">
               Chúc mừng các sĩ tử đã hoàn thành bài thi ôn luyện THPT! Xem bảng xếp hạng chung cuộc trên màn hình giáo viên.
             </p>
@@ -308,7 +411,7 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
                   </span>
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${
                     currentQ.bloomLevel === 'Vận dụng cao'
-                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 shadow-sm'
                       : 'bg-blue-500/20 text-blue-300 border-blue-500/30'
                   }`}>
                     {currentQ.bloomLevel === 'Vận dụng cao' ? '⚡ VẬN DỤNG CAO (VƯỢT RÀO)' : currentQ.bloomLevel}
@@ -330,7 +433,7 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
               </div>
             </div>
 
-            {/* Answer Options Grid (A, B, C, D) */}
+            {/* Answer Options Grid (A, B, C, D) - Fully interactive with instant touch response */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 my-2">
               {currentQ.options.map((optText, optIdx) => {
                 const letter = ['A', 'B', 'C', 'D'][optIdx];
@@ -338,7 +441,6 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
                 const isTheCorrectAnswer = isRevealed && optIdx === currentQ.correctIndex;
                 const isSelectedAndWrong = isRevealed && isSelected && !isCorrect;
 
-                // Color themes
                 const getBtnStyle = () => {
                   if (isRevealed) {
                     if (isTheCorrectAnswer) {
@@ -351,15 +453,15 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
                   }
 
                   if (isSelected) {
-                    return 'bg-amber-500 text-slate-950 font-bold border-amber-300 shadow-lg shadow-amber-500/20 scale-[1.01]';
+                    return 'bg-amber-500 text-slate-950 font-bold border-amber-300 shadow-lg shadow-amber-500/30 ring-2 ring-amber-400 scale-[1.01]';
                   }
 
                   // Default options styled by letter
                   switch (letter) {
-                    case 'A': return 'bg-blue-950/70 hover:bg-blue-900/80 border-blue-800/80 text-blue-100';
-                    case 'B': return 'bg-emerald-950/70 hover:bg-emerald-900/80 border-emerald-800/80 text-emerald-100';
-                    case 'C': return 'bg-amber-950/70 hover:bg-amber-900/80 border-amber-800/80 text-amber-100';
-                    case 'D': return 'bg-purple-950/70 hover:bg-purple-900/80 border-purple-800/80 text-purple-100';
+                    case 'A': return 'bg-blue-950/70 hover:bg-blue-900/80 active:bg-blue-900 border-blue-800/80 text-blue-100';
+                    case 'B': return 'bg-emerald-950/70 hover:bg-emerald-900/80 active:bg-emerald-900 border-emerald-800/80 text-emerald-100';
+                    case 'C': return 'bg-amber-950/70 hover:bg-amber-900/80 active:bg-amber-900 border-amber-800/80 text-amber-100';
+                    case 'D': return 'bg-purple-950/70 hover:bg-purple-900/80 active:bg-purple-900 border-purple-800/80 text-purple-100';
                     default: return 'bg-slate-900 border-slate-800 text-white';
                   }
                 };
@@ -367,20 +469,25 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
                 return (
                   <button
                     key={optIdx}
+                    type="button"
                     onClick={() => handleSelectOption(optIdx)}
-                    disabled={!isQuestionActive || chosenAnswer !== null}
-                    className={`p-4 rounded-xl border text-left flex items-start gap-3 transition-all relative overflow-hidden ${getBtnStyle()}`}
+                    disabled={!isQuestionActive}
+                    className={`p-4 rounded-xl border text-left flex items-start gap-3 transition-all relative overflow-hidden select-none cursor-pointer active:scale-98 ${getBtnStyle()} ${
+                      !isQuestionActive ? 'cursor-not-allowed' : ''
+                    }`}
                   >
-                    <span className="w-7 h-7 rounded-lg bg-black/30 flex items-center justify-center font-black text-sm shrink-0">
+                    <span className={`w-8 h-8 rounded-lg flex items-center justify-center font-black text-sm shrink-0 ${
+                      isSelected && !isRevealed ? 'bg-slate-950 text-amber-400' : 'bg-black/40 text-white'
+                    }`}>
                       {letter}
                     </span>
-                    <span className="text-xs sm:text-sm font-medium leading-snug pt-0.5">
+                    <span className="text-xs sm:text-sm font-medium leading-snug pt-1 flex-1">
                       {optText}
                     </span>
 
                     {isSelected && !isRevealed && (
-                      <span className="absolute right-3 top-3 text-[10px] font-bold px-2 py-0.5 rounded-full bg-black/40">
-                        Đã chọn
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-950 text-amber-400 shrink-0 self-center">
+                        ✓ Đã chọn
                       </span>
                     )}
                   </button>
@@ -390,7 +497,7 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
 
             {/* Post-Answer Feedback & Explanation */}
             {isRevealed && (
-              <div className={`p-4 rounded-xl border text-xs leading-relaxed animate-in fade-in ${
+              <div className={`p-4 rounded-xl border text-xs leading-relaxed ${
                 isCorrect
                   ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
                   : 'bg-rose-950/40 border-rose-500/40 text-rose-200'
@@ -415,9 +522,17 @@ export const StudentMobileView: React.FC<StudentMobileViewProps> = ({
             )}
 
             {/* Answer submission status bar */}
-            {chosenAnswer !== null && isQuestionActive && (
-              <div className="p-3 rounded-xl bg-slate-900/90 border border-amber-500/30 text-center text-xs text-amber-300 font-medium">
-                ✓ Đã ghi nhận câu trả lời trong {answeredTimeSec}s! Đang chờ hết thời gian để xem kết quả...
+            {isQuestionActive && (
+              <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 text-center text-xs">
+                {chosenAnswer !== null ? (
+                  <span className="text-amber-400 font-semibold">
+                    ✓ Đã chọn đáp án {['A', 'B', 'C', 'D'][chosenAnswer]}. Bạn có thể bấm chọn đáp án khác bất kỳ lúc nào trước khi hết giờ!
+                  </span>
+                ) : (
+                  <span className="text-slate-400">
+                    👉 Hãy chạm vào một trong 4 phương án A - B - C - D ở trên để trả lời!
+                  </span>
+                )}
               </div>
             )}
 
