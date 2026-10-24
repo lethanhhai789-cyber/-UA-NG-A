@@ -1,0 +1,6 @@
+{
+  "name": "Đua Ngựa Tri Thức THPT 3D",
+  "description": "Nền tảng thi trắc nghiệm ôn luyện THPT Quốc gia trực quan hóa bằng Game Đua Ngựa 3D thời gian thực, vượt rào Vận dụng cao, đồng bộ đa màn hình và xuất báo cáo sư phạm.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
